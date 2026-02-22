@@ -324,28 +324,70 @@ export class KanbanView extends BasesView {
 		modal.open();
 	}
 
+	/**
+	 * Determine the target folder for new cards by looking at where existing
+	 * entries in the base live. Falls back to vault root.
+	 */
+	private getTargetFolder(): string {
+		const allEntries = this.data?.data ?? [];
+		if (allEntries.length > 0) {
+			return allEntries[0].file.parent?.path ?? '';
+		}
+		return '';
+	}
+
 	private async createCardNote(noteName: string, columnValue: string | null): Promise<void> {
 		// Create the note
 		const fileName = noteName.endsWith('.md') ? noteName : `${noteName}.md`;
-		
+
 		try {
-			// Determine the folder - use current file's folder or root
-			const activeFile = this.app.workspace.getActiveFile();
-			const folder = activeFile?.parent?.path ?? '';
+			// Determine the folder from existing entries in the base filter
+			const folder = this.getTargetFolder();
 			const fullPath = folder ? `${folder}/${fileName}` : fileName;
-			
-			// Create file with frontmatter if we have a column value
+
+			// Build frontmatter from the groupBy property and all common
+			// frontmatter keys found on existing entries in this column
 			let content = '';
 			if (columnValue !== null && this.groupByProperty) {
-				content = `---\n${this.groupByProperty}: ${columnValue}\n---\n\n`;
+				const frontmatterLines: string[] = [`${this.groupByProperty}: ${columnValue}`];
+
+				// Find an existing entry in the same column to use as a template
+				const columnGroup = this.currentGroups.find(g => {
+					const name = this.getColumnName(g.key);
+					return name === columnValue;
+				});
+				if (columnGroup && columnGroup.entries.length > 0) {
+					const templateFile = columnGroup.entries[0].file;
+					const cache = this.app.metadataCache.getFileCache(templateFile);
+					const fm = cache?.frontmatter;
+					if (fm) {
+						for (const [key, value] of Object.entries(fm)) {
+							if (key === 'position' || key === this.groupByProperty) continue;
+							// Carry over string/number properties as empty placeholders
+							if (typeof value === 'string' || typeof value === 'number') {
+								frontmatterLines.push(`${key}: `);
+							}
+						}
+					}
+				}
+
+				content = `---\n${frontmatterLines.join('\n')}\n---\n\n`;
 			}
-			
+
+			// Ensure the folder exists
+			if (folder) {
+				const folderExists = this.app.vault.getAbstractFileByPath(folder);
+				if (!folderExists) {
+					await this.app.vault.createFolder(folder);
+				}
+			}
+
 			const file = await this.app.vault.create(fullPath, content);
-			
+
 			// Open the new file
 			const leaf = this.app.workspace.getLeaf();
 			await leaf.openFile(file);
-			
+
 			new Notice(`Created "${noteName}"`);
 		} catch (error) {
 			new Notice(`Failed to create note: ${error}`);
